@@ -1,0 +1,18 @@
+{
+  "episodes": 11000,
+  "p1_wins": 4604,
+  "p2_wins": 6320,
+  "draws": 76,
+  "avg_steps": 47.49572727272727,
+  "alpha": 0.4,
+  "gamma": 0.98,
+  "epsilon": 0.05,
+  "epsilon_min": 0.05,
+  "epsilon_decay": 0.9995,
+  "include_boost": true,
+  "merge": "avg",
+  "merge_w1": 1.0,
+  "merge_w2": 1.0,
+  "space_weight": 0.1,
+  "quick_win_weight": 0.5
+}

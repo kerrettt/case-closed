@@ -84,67 +84,217 @@ def end_game():
 
 
 def decide_move(my_trail, other_trail, turn_count, my_boosts):
-    """Simple decision logic for the agent.
-    
-    Strategy:
-    - Move in a direction that doesn't immediately hit a trail
-    - Use boost if we have them and it's mid-game (turns 30-80)
     """
-    if not my_trail:
+    Heuristic Tron agent:
+    - Never U-turn.
+    - Score candidate moves by: (reachable space) + (Voronoi advantage) + (local freedom)
+      and mild penalties for being too close early or burning boosts without benefit.
+    - Uses BOOST to escape when boxed or to win a race to a big region.
+
+    Relies on game_state["board"] (18x20 list of lists; 0 = empty, 1 = wall).  # see local-tester dummy state
+    Returns "DIR" or "DIR:BOOST".  # judge expects exactly this format
+    """
+    # --- pull the current board (18 rows x 20 cols of 0/1) ---
+    board = game_state.get("board")
+    if board is None or not my_trail:
+        # Fallback if no state yet
         return "RIGHT"
-    
-    # Get current head position and direction
-    head = my_trail[-1] if my_trail else (0, 0)
-    
-    # Calculate current direction if we have at least 2 positions
-    current_dir = "RIGHT"
-    if len(my_trail) >= 2:
-        prev = my_trail[-2]
-        dx = head[0] - prev[0]
-        dy = head[1] - prev[1]
-        
-        # Normalize for torus wrapping
-        if abs(dx) > 1:
-            dx = -1 if dx > 0 else 1
-        if abs(dy) > 1:
-            dy = -1 if dy > 0 else 1
-        
-        if dx == 1:
-            current_dir = "RIGHT"
-        elif dx == -1:
-            current_dir = "LEFT"
-        elif dy == 1:
-            current_dir = "DOWN"
-        elif dy == -1:
-            current_dir = "UP"
-    
-    # Simple strategy: try to avoid trails, prefer continuing straight
-    # Check available directions (not opposite to current)
-    directions = ["UP", "DOWN", "LEFT", "RIGHT"]
-    opposite = {"UP": "DOWN", "DOWN": "UP", "LEFT": "RIGHT", "RIGHT": "LEFT"}
-    
-    # Remove opposite direction
-    if current_dir in opposite:
-        try:
-            directions.remove(opposite[current_dir])
-        except ValueError:
-            pass
-    
-    # Prefer current direction if still available
-    if current_dir in directions:
-        chosen_dir = current_dir
-    else:
-        # Pick first available
-        chosen_dir = directions[0] if directions else "RIGHT"
-    
-    # Decide whether to use boost
-    # Use boost in mid-game when we still have them
-    use_boost = my_boosts > 0 and 30 <= turn_count <= 80
-    
-    if use_boost:
-        return f"{chosen_dir}:BOOST"
-    else:
-        return chosen_dir
+
+    H, W = len(board), (len(board[0]) if board else 0)
+
+    # --- tiny helpers (local, no globals) ---
+    def wrap(x, y):
+        return x % W, y % H
+
+    def at(x, y):
+        xx, yy = wrap(x, y)
+        return board[yy][xx]
+
+    def is_empty(x, y):
+        return at(x, y) == 0  # 0 == EMPTY
+
+    DIRS = {
+        "UP":    (0, -1),
+        "DOWN":  (0,  1),
+        "LEFT":  (-1, 0),
+        "RIGHT": (1,  0),
+    }
+    OPP = {"UP": "DOWN", "DOWN": "UP", "LEFT": "RIGHT", "RIGHT": "LEFT"}
+
+    def dir_from_trail(trail):
+        if len(trail) < 2:
+            return "RIGHT"
+        x2, y2 = trail[-1]
+        x1, y1 = trail[-2]
+        dx = (x2 - x1)
+        dy = (y2 - y1)
+        # normalize for torus: a step can look like +/- (W-1) or (H-1)
+        if dx == 1 or dx == -(W - 1):
+            return "RIGHT"
+        if dx == -1 or dx == (W - 1):
+            return "LEFT"
+        if dy == 1 or dy == -(H - 1):
+            return "DOWN"
+        if dy == -1 or dy == (H - 1):
+            return "UP"
+        return "RIGHT"
+
+    def step_cell(x, y, dname):
+        dx, dy = DIRS[dname]
+        return wrap(x + dx, y + dy)
+
+    def free_neighbors(x, y, board_like=None):
+        # count/free neighbors using a board snapshot; default is current board
+        M = board if board_like is None else board_like
+        out = []
+        for dname, (dx, dy) in DIRS.items():
+            nx, ny = (x + dx) % W, (y + dy) % H
+            if M[ny][nx] == 0:
+                out.append((dname, nx, ny))
+        return out
+
+    def clone_board():
+        return [row[:] for row in board]
+
+    def mark_wall(M, x, y):
+        xx, yy = x % W, y % H
+        M[yy][xx] = 1  # 1 == AGENT/wall
+
+    def flood_area(M, sx, sy, limit=None):
+        # BFS over empty cells reachable from (sx,sy); (sx,sy) itself may be non-empty (our head),
+        # so we expand into its empty neighbors.
+        seen = set()
+        q = []
+        for _, nx, ny in free_neighbors(sx, sy, M):
+            q.append((nx, ny))
+            seen.add((nx, ny))
+        head = 0
+        count = 0
+        lim = limit or (H * W)
+        while head < len(q) and count < lim:
+            x, y = q[head]
+            head += 1
+            count += 1
+            for _, nx, ny in free_neighbors(x, y, M):
+                if (nx, ny) not in seen:
+                    seen.add((nx, ny))
+                    q.append((nx, ny))
+        return count
+
+    def bfs_dists(M, starts):
+        # multi-source BFS distances over empty cells
+        from collections import deque as _dq
+        INF = 10**9
+        dist = [[INF] * W for _ in range(H)]
+        q = _dq()
+        for (sx, sy) in starts:
+            dist[sy][sx] = 0
+            q.append((sx, sy))
+        while q:
+            x, y = q.popleft()
+            for _, nx, ny in free_neighbors(x, y, M):
+                if dist[ny][nx] == INF:
+                    dist[ny][nx] = dist[y][x] + 1
+                    q.append((nx, ny))
+        return dist, INF
+
+    def torus_manhattan(ax, ay, bx, by):
+        dx = min((ax - bx) % W, (bx - ax) % W)
+        dy = min((ay - by) % H, (by - ay) % H)
+        return dx + dy
+
+    # --- gather live positions and direction ---
+    my_head = my_trail[-1]
+    opp_head = other_trail[-1] if other_trail else None
+    cur_dir = dir_from_trail(my_trail)
+
+    # candidate directions: avoid U-turn
+    candidates = [d for d in ("UP", "DOWN", "LEFT", "RIGHT") if d != OPP[cur_dir]]
+
+    # --- evaluate each (dir, maybe-boost) action ---
+    best = ("RIGHT", False)
+    best_score = -1e18
+
+    for d in candidates:
+        # 1-step viability
+        nx1, ny1 = step_cell(*my_head, d)
+        if not is_empty(nx1, ny1):
+            continue  # suicide
+
+        # simulate placing our trail for 1 step
+        board1 = clone_board()
+        mark_wall(board1, nx1, ny1)
+
+        # check second step viability for boost
+        boost_ok = False
+        nx2 = ny2 = None
+        if my_boosts > 0:
+            nx2, ny2 = step_cell(nx1, ny1, d)
+            if board1[ny2][nx2] == 0:
+                boost_ok = True
+
+        # define two variants to score: no-boost and (if possible) boost
+        variants = [("no", (nx1, ny1), board1)]
+        if boost_ok:
+            board2 = [row[:] for row in board1]
+            mark_wall(board2, nx2, ny2)
+            variants.append(("boost", (nx2, ny2), board2))
+
+        for mode, (hx, hy), M in variants:
+            # Local freedom (branching factor) at the resulting head
+            deg = len(free_neighbors(hx, hy, M))
+
+            # Reachable area after we commit (on M)
+            area = flood_area(M, hx, hy)
+
+            # Voronoi-style advantage: cells we can reach in fewer steps than opp
+            vor_adv = 0
+            if opp_head is not None:
+                d_me, INF = bfs_dists(M, [(hx, hy)])
+                d_opp, _ = bfs_dists(M, [opp_head])
+                for y in range(H):
+                    for x in range(W):
+                        if M[y][x] == 0:
+                            dm = d_me[y][x]
+                            do = d_opp[y][x]
+                            if dm < do:
+                                vor_adv += 1
+
+            # Early-game “don’t get too close” penalty to avoid head-on draws
+            close_pen = 0
+            if opp_head is not None and turn_count < 40:
+                dist = torus_manhattan(hx, hy, *opp_head)
+                close_pen = max(0, 7 - dist)  # only penalize when very close
+
+            # Prefer not to BOOST unless it clearly helps; also use BOOST to escape traps
+            boost_cost = 0.8 if mode == "boost" else 0.0
+            escape_bonus = 0.0
+            # if we are currently in a corridor/boxed (few exits), boost gets extra credit
+            cur_deg = len(free_neighbors(*my_head))
+            if mode == "boost" and (cur_deg <= 1 or deg >= 3):
+                escape_bonus = 3.0
+
+            # Heuristic score (weights tuned to be sane, not perfect)
+            score = (
+                1.3 * area +
+                1.1 * vor_adv +
+                0.6 * deg -
+                0.7 * close_pen -
+                boost_cost +
+                escape_bonus
+            )
+
+            if score > best_score:
+                best_score = score
+                best = (d, mode == "boost")
+
+    # Safety fallback if somehow nothing scored
+    if best is None:
+        return cur_dir
+
+    dname, use_boost = best
+    return f"{dname}{':BOOST' if use_boost else ''}"
+
 
 
 if __name__ == "__main__":

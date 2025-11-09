@@ -5,6 +5,14 @@ from threading import Lock
 from collections import deque
 
 from case_closed_game import Game, Direction, GameResult
+import pickle
+from rl_utils import encode_state, all_actions, filter_actions_by_legality
+Q_TABLE = {}
+try:
+    with open(os.path.join("artifacts", "q_table.pkl"), "rb") as f:
+        Q_TABLE = pickle.load(f)
+except FileNotFoundError:
+    Q_TABLE = {}
 
 # Flask API server setup
 app = Flask(__name__)
@@ -98,14 +106,18 @@ def send_move():
     # -----------------your code here-------------------
     # Simple example: always go RIGHT (replace this with your logic)
     # To use a boost: move = "RIGHT:BOOST"
-    move = "RIGHT"
-    
-    # Example: Use boost if available and it's late in the game
-    # turn_count = state.get("turn_count", 0)
-    # if boosts_remaining > 0 and turn_count > 50:
-    #     move = "RIGHT:BOOST"
-    # -----------------end code here--------------------
+    with game_lock:
+        state = dict(LAST_POSTED_STATE)
+        my_agent = GLOBAL_GAME.agent1 if player_number == 1 else GLOBAL_GAME.agent2
+        s = encode_state(GLOBAL_GAME, my_agent)
+        actions = filter_actions_by_legality(GLOBAL_GAME, my_agent, all_actions(True))
+    if actions:
+        best = max(actions, key=lambda a: Q_TABLE.get((s, a), 0.0))
+    else:
+        best = (my_agent.direction, False)
 
+    d, use_boost = best
+    move = f"{d.name}{':BOOST' if use_boost else ''}"
     return jsonify({"move": move}), 200
 
 
